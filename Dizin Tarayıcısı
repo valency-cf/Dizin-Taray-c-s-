@@ -1,0 +1,170 @@
+import requests
+import time
+import json
+import csv
+import random
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/119.0"
+]
+
+class InteractiveDirScanner:
+    def __init__(self, target_url, wordlist_file, extensions, threads, delay, output_file, output_format):
+        self.target_url = target_url.rstrip('/')
+        self.wordlist_file = wordlist_file
+        self.extensions = [e.strip('.') for e in extensions.split(',')] if extensions else []
+        self.threads = threads
+        self.delay = delay
+        self.output_file = output_file
+        self.output_format = output_format.lower() if output_format else "json"
+        
+        self.match_codes = [200, 204, 301, 302, 307, 401, 403]
+        self.headers = {"User-Agent": USER_AGENTS[0]}
+        self.discovered_items = []
+        self.scanned_urls = set()
+
+    def _build_queue(self, words):
+        queue = []
+        for word in words:
+            word = word.strip()
+            if not word or word.startswith('#'):
+                continue
+            queue.append(word)
+            for ext in self.extensions:
+                queue.append(f"{word}.{ext}")
+        return list(set(queue))
+
+    def _fetch_url(self, base_url, path):
+        full_url = f"{base_url}/{path}"
+        if full_url in self.scanned_urls:
+            return None
+        self.scanned_urls.add(full_url)
+
+        if self.delay > 0:
+            time.sleep(self.delay)
+
+        req_headers = self.headers.copy()
+        req_headers["User-Agent"] = random.choice(USER_AGENTS)
+
+        try:
+            response = requests.get(
+                full_url, 
+                headers=req_headers, 
+                timeout=6, 
+                allow_redirects=False,
+                verify=False
+            )
+            
+            status = response.status_code
+            size = len(response.content)
+
+            if status in self.match_codes:
+                redirect_target = response.headers.get('Location', '')
+                redirect_str = f" -> {redirect_target}" if redirect_target else ""
+                
+                print(f"[+] [{status}] {size:>8} B | /{path:<35}{redirect_str}")
+
+                result_data = {
+                    "url": full_url,
+                    "path": f"/{path}",
+                    "status": status,
+                    "size": size,
+                    "redirect": redirect_target
+                }
+                self.discovered_items.append(result_data)
+        except requests.RequestException:
+            pass
+        return None
+
+    def start(self):
+        print("\n" + "="*75)
+        print(" INTERACTIVE DIRECTORY SCANNER ")
+        print("="*75)
+        print(f"[*] Hedef URL     : {self.target_url}")
+        print(f"[*] Wordlist      : {self.wordlist_file}")
+        print(f"[*] Thread Sayısı : {self.threads}")
+        print(f"[*] Uzantılar     : {self.extensions or 'Yok'}")
+        print("="*75 + "\n")
+
+        try:
+            with open(self.wordlist_file, 'r', encoding='utf-8', errors='ignore') as f:
+                words = f.read().splitlines()
+        except FileNotFoundError:
+            print(f"[!] Hata: '{self.wordlist_file}' dosyası bulunamadı! Lütfen dosya yolunu kontrol edin.")
+            return
+
+        start_time = time.time()
+        path_list = self._build_queue(words)
+
+        with ThreadPoolExecutor(max_workers=self.threads) as executor:
+            futures = [executor.submit(self._fetch_url, self.target_url, path) for path in path_list]
+            for future in as_completed(futures):
+                future.result()
+
+        duration = time.time() - start_time
+
+        print("\n" + "="*75)
+        print(f"[+] Tarama Tamamlandı! Toplam Bulunan: {len(self.discovered_items)} | Geçen Süre: {duration:.2f}s")
+        print("="*75)
+
+        if self.output_file:
+            self._save_report()
+
+    def _save_report(self):
+        if self.output_format == "csv":
+            with open(self.output_file, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=["url", "path", "status", "size", "redirect"])
+                writer.writeheader()
+                writer.writerows(self.discovered_items)
+        else:
+            with open(self.output_file, 'w', encoding='utf-8') as f:
+                json.dump(self.discovered_items, f, indent=4)
+        print(f"[+] Rapor '{self.output_file}' dosyasına kaydedildi.")
+
+
+if __name__ == "__main__":
+    requests.packages.urllib3.disable_warnings()
+
+    print("=== DİZİN TARAYICI KULLANICI GİRİŞİ ===")
+    
+    target_url = input("Hedef URL: ").strip()
+    while not target_url:
+        target_url = input("[!] URL boş olamaz. Hedef URL: ").strip()
+    if not target_url.startswith("http://") and not target_url.startswith("https://"):
+        target_url = "http://" + target_url
+
+    wordlist_file = input("Wordlist Dosya Yolu (Örn: wordlist.txt): ").strip()
+    while not wordlist_file:
+        wordlist_file = input("[!] Wordlist boş olamaz. Dosya yolu: ").strip()
+
+    extensions = input("Aranacak Uzantılar (Virgülle ayırın: php,html,txt / Boş bırakılabilir): ").strip()
+
+    threads_input = input("Thread Sayısı (Varsayılan 20 / Enter'a basıp geçebilirsiniz): ").strip()
+    threads = int(threads_input) if threads_input.isdigit() else 20
+
+    delay_input = input("İstekler Arası Gecikme (Saniye cinsinden float, örn: 0.1 / Varsayılan 0): ").strip()
+    try:
+        delay = float(delay_input)
+    except ValueError:
+        delay = 0.0
+
+    output_file = input("Sonuçlar Kaydedilsin mi? (Dosya adı yazın örn: sonuc.json / İstemiyorsanız Enter'a basın): ").strip()
+    output_format = "json"
+    if output_file:
+        if output_file.endswith(".csv"):
+            output_format = "csv"
+
+    scanner = InteractiveDirScanner(
+        target_url=target_url,
+        wordlist_file=wordlist_file,
+        extensions=extensions,
+        threads=threads,
+        delay=delay,
+        output_file=output_file,
+        output_format=output_format
+    )
+    scanner.start()
